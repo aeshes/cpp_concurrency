@@ -1,131 +1,56 @@
 #include <iostream>
-#include <string>
-#include <functional>
+#include <numeric>
+#include <algorithm>
+#include <vector>
 #include <thread>
-#include <chrono>
-#include <queue>
 
-#include <Windows.h>
-
-#include "include\sqlite3.h"
-
-#pragma comment(lib, ".\\lib\\sqlite3.lib")
-
-
-struct func
+template <typename Iterator, typename T>
+struct accumulate_block
 {
-	int& i;
-
-	func(int& _i) : i(_i) {}
-
-	void operator()()
+	void operator()(Iterator first, Iterator last, T& result)
 	{
-		Sleep(500);
-		for (unsigned j = 0; j < 100000000; ++j)
-			std::cout << (++i);
+		std::cout << "thread run" << std::endl;
+		result = std::accumulate(first, last, result);
 	}
 };
 
-class thread_guard
+template <typename Iterator, typename T>
+T parallel_accumulate(Iterator first, Iterator last, T init)
 {
-	std::thread& _thr;
+	const unsigned long length = std::distance(first, last);
+	if (!length) return init;
 
-public:
-	explicit thread_guard(std::thread& th)
-		: _thr(th) {}
-	~thread_guard()
+	const unsigned long min_per_thread = 25;
+	const unsigned long max_threads = (length + min_per_thread - 1) / min_per_thread;
+
+	const unsigned long hardware_threads = std::thread::hardware_concurrency();
+	const unsigned long num_threads = std::min(hardware_threads ? hardware_threads : 2, max_threads);
+	const unsigned long block_size = length / num_threads;
+
+	std::vector<T> results(num_threads);
+	std::vector<std::thread> threads(num_threads - 1);
+
+	Iterator block_start = first;
+	for (unsigned long i = 0; i < (num_threads - 1); ++i)
 	{
-		if (_thr.joinable())
-			_thr.join();
+		Iterator block_end = block_start;
+		std::advance(block_end, block_size);
+		threads[i] = std::thread(accumulate_block<Iterator, T>(),
+			block_start,
+			block_end,
+			std::ref(results[i]));
+		block_start = block_end;
 	}
+	accumulate_block<Iterator, T>()(block_start, last, results[num_threads - 1]);
+	std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
 
-	thread_guard(thread_guard const&) = delete;
-	thread_guard& operator=(thread_guard const&) = delete;
-};
-
-class db_connection
-{
-	static sqlite3 *db;
-	db_connection()
-	{
-		int ret = sqlite3_open_v2(".\\data\\data.db", &db, SQLITE_OPEN_READONLY, nullptr);
-		if (SQLITE_OK != ret)
-		{
-			std::cout << sqlite3_errmsg(db) << std::endl;
-		}
-	}
-public:
-	static sqlite3* getInstance()
-	{
-		static db_connection conn;
-		return db;
-	}
-
-	db_connection(db_connection const&) = delete;
-	db_connection& operator=(db_connection const&) = delete;
-};
-
-sqlite3* db_connection::db = nullptr;
-
-
-int sqlite_callback(void* data, int argc, char** argv, char** colnames)
-{
-	for (int i = 0; i < argc; ++i)
-	{
-		std::cout << (argv[i] ? argv[i] : "NULL") << std::endl;
-	}
-	return 0;
+	return std::accumulate(results.begin(), results.end(), init);
 }
-
-void extract_data()
-{
-	sqlite3*    db = db_connection::getInstance();
-	const char* sql = "SELECT * FROM employee WHERE id = 5";
-	char*       errmsg = nullptr;
-
-	int ret = sqlite3_exec(db, sql, sqlite_callback, nullptr, &errmsg);
-}
-
-struct background_task
-{
-	void operator()() const
-	{
-		extract_data();
-	}
-};
-
-std::queue<background_task> task_queue;
-
-static volatile bool stop_flag = false;
-
-void run()
-{
-	while (!stop_flag)
-	{
-		if (!task_queue.empty())
-		{
-			task_queue.front()();
-			task_queue.pop();
-		}
-		else
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
-	}
-}
-
 
 int main()
 {
-	std::thread daemon(run);
-	daemon.detach();
+	std::vector<int> v(1000000, 1);
 
-	background_task task;
-	task_queue.push(task);
-
-	std::cout << "hw concurrency: " << std::thread::hardware_concurrency() << std::endl;
-	
-	int i;
-	std::cin >> i;
-	return 0;
+	int result = parallel_accumulate(v.begin(), v.end(), 0);
+	std::cout << result << std::endl;
 }
